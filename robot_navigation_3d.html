@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Autonomous Robot Navigation Simulator – 3D</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#0f2240;--ink:#e8f0ff;--ac:#00c2cb;--pn:rgba(15,34,64,.86)}
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+body{height:100%;margin:0;background:#0f2240;color:var(--ink);font-family:"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
+#c{position:absolute;inset:0;touch-action:none}
+#hud{position:absolute;left:8px;top:calc(8px + env(safe-area-inset-top,0px));background:var(--pn);border:1px solid #2b4a7a;border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.5;max-width:270px}
+#hud b{font-size:13px;color:var(--ac)}
+#st{margin-top:4px}#msg{margin-top:4px;color:#ffd400}
+#bar{position:absolute;left:0;right:0;bottom:0;padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));display:flex;flex-wrap:wrap;gap:6px;justify-content:center;background:linear-gradient(transparent,rgba(15,34,64,.9) 40%)}
+button{font:inherit;font-size:13px;color:var(--ink);background:#1b3763;border:1px solid #2f5b9a;border-radius:7px;padding:7px 10px;cursor:pointer}
+button.on{background:var(--ac);color:#06223a;border-color:var(--ac);font-weight:600}
+button:focus-visible{outline:2px solid #fff}
+#np{position:absolute;left:50%;top:40%;transform:translate(-50%,-50%);background:#b3202a;color:#fff;font-weight:700;font-size:18px;text-align:center;padding:14px 20px;border-radius:10px;border:2px solid #fff;max-width:80%;z-index:5}#np[hidden]{display:none}
+#hint{position:absolute;right:8px;top:calc(8px + env(safe-area-inset-top,0px));font-size:11px;background:var(--pn);padding:6px 8px;border-radius:8px;max-width:190px;border:1px solid #2b4a7a}
+@media(max-width:600px){#hint{display:none}#hud{max-width:215px;font-size:11px}}
+</style></head><body>
+<div id="c"></div>
+<div id="hud"><b>Autonomous Robot Navigation Simulator</b><div id="st"></div><div id="msg">Press Start.</div></div>
+<div id="np" hidden>No other way found to reach the goal.</div>
+<div id="hint">Drag: rotate view · Scroll/pinch: zoom · Tap floor: place a hidden obstacle · Orange = undetected, red = detected by robot · Yellow line = A* path · Ring = sensor range</div>
+<div id="bar">
+<button id="run">▶ Start</button><button id="rst">↺ Reset</button><button id="sud">⚠ Sudden obstacle</button><button id="blk">⛔ Block goal</button><button id="fol" class="on">Follow</button>
+<span style="width:100%;height:0"></span>
+<button data-w="day" class="on">☀ Day</button><button data-w="night">🌙 Night</button><button data-w="rain">🌧 Rain</button><button data-w="fog">🌫 Fog</button>
+<button id="ml">Detector: Baseline</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const T=THREE,N=30,SX=2,SY=2,GX=27,GY=27,BRAKE=2.4,SPEED=3;
+// Sensor range (grid units) per condition. Simulation parameters, not measured accuracy.
+const RANGE={base:{day:8,night:3,rain:2.2,fog:1.6},ml:{day:8,night:6,rain:5,fog:4.5}};
+const WX={day:{bg:0x9ecff0,fog:[30,90],amb:.95,sun:.9,head:0},night:{bg:0x040712,fog:[6,30],amb:.3,sun:.05,head:1.4},rain:{bg:0x4b5661,fog:[6,26],amb:.6,sun:.35,head:.7},fog:{bg:0xbfc6cc,fog:[1,12],amb:.8,sun:.5,head:.4}};
+const idx=(x,y)=>y*N+x,cx=i=>i-N/2+.5,w2g=v=>Math.floor(v+N/2);
+let weather='day',ml=false,running=false,follow=true,S,obs=[],pathG=new T.Group(),acc=0;
+const $=id=>document.getElementById(id);
+const renderer=new T.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));$('c').appendChild(renderer.domElement);
+const scene=new T.Scene(),cam=new T.PerspectiveCamera(55,1,.1,200);
+const amb=new T.AmbientLight(0xffffff,1),sun=new T.DirectionalLight(0xffffff,1);sun.position.set(10,25,8);scene.add(amb,sun,pathG);
+// floor + walls + shelves
+const floor=new T.Mesh(new T.PlaneGeometry(N,N),new T.MeshLambertMaterial({color:0x8d9399}));floor.rotation.x=-Math.PI/2;scene.add(floor);
+const grid=new T.GridHelper(N,N,0x6b7178,0x7a8086);grid.position.y=.01;scene.add(grid);
+const STATIC=new Uint8Array(N*N);
+for(let i=0;i<N;i++){STATIC[idx(i,0)]=STATIC[idx(i,N-1)]=STATIC[idx(0,i)]=STATIC[idx(N-1,i)]=1}
+[[0,0,N-1,0],[0,N-1,N-1,N-1],[0,0,0,N-1],[N-1,0,N-1,N-1]].forEach(r=>{const w=r[2]-r[0]+1,h=r[3]-r[1]+1,m=new T.Mesh(new T.BoxGeometry(w,1.6,h),new T.MeshLambertMaterial({color:0x5a6270}));m.position.set(cx(r[0])+(w-1)/2,.8,cx(r[1])+(h-1)/2);scene.add(m)});
+[[5,4,6,12],[5,17,6,25],[12,2,13,9],[12,14,13,22],[19,6,20,14],[19,19,20,27],[25,3,26,10],[25,16,26,24]].forEach(r=>{const w=r[2]-r[0]+1,h=r[3]-r[1]+1;
+ for(let y=r[1];y<=r[3];y++)for(let x=r[0];x<=r[2];x++)STATIC[idx(x,y)]=1;
+ for(let L=0;L<3;L++){const m=new T.Mesh(new T.BoxGeometry(w*.96,.62,h*.98),new T.MeshLambertMaterial({color:L%2?0x2d4a7a:0xb8864b}));m.position.set(cx(r[0])+(w-1)/2,.33+L*.66,cx(r[1])+(h-1)/2);scene.add(m)}});
+// start / goal markers
+const goal=new T.Mesh(new T.CylinderGeometry(.6,.6,.08,32),new T.MeshBasicMaterial({color:0x2ee66b,fog:false}));goal.position.set(cx(GX),.05,cx(GY));scene.add(goal);
+const goalB=new T.Mesh(new T.CylinderGeometry(.08,.08,2.4,8),new T.MeshBasicMaterial({color:0x2ee66b,fog:false}));goalB.position.set(cx(GX),1.2,cx(GY));scene.add(goalB);
+const startM=new T.Mesh(new T.CylinderGeometry(.6,.6,.08,32),new T.MeshBasicMaterial({color:0x3b82f6,fog:false}));startM.position.set(cx(SX),.05,cx(SY));scene.add(startM);
+// robot
+const robot=new T.Group(),mat=(c)=>new T.MeshLambertMaterial({color:c,emissive:c,emissiveIntensity:.6,fog:false});
+const body=new T.Mesh(new T.BoxGeometry(.7,.28,.9),mat(0xe6e9ee));body.position.y=.34;robot.add(body);
+[[-.4,.2],[.4,.2],[-.4,-.2],[.4,-.2]].forEach(p=>{const w=new T.Mesh(new T.CylinderGeometry(.16,.16,.1,16),mat(0x15181d));w.rotation.z=Math.PI/2;w.position.set(p[0],.16,p[1]);robot.add(w)});
+const lid=new T.Mesh(new T.CylinderGeometry(.14,.14,.16,16),mat(0x1d2430));lid.position.set(0,.56,0);robot.add(lid);
+const led=new T.Mesh(new T.BoxGeometry(.5,.06,.04),new T.MeshBasicMaterial({color:0x4dd2ff,fog:false}));led.position.set(0,.36,.46);robot.add(led);
+const pole=new T.Mesh(new T.CylinderGeometry(.03,.03,.8,8),new T.MeshBasicMaterial({color:0xffffff,fog:false}));pole.position.y=.95;robot.add(pole);const bc=new T.Mesh(new T.SphereGeometry(.13,16,12),new T.MeshBasicMaterial({color:0xffd400,fog:false}));bc.position.y=1.4;robot.add(bc);const gc=document.createElement('canvas');gc.width=gc.height=64;const gx=gc.getContext('2d'),gr=gx.createRadialGradient(32,32,2,32,32,32);gr.addColorStop(0,'rgba(255,230,120,1)');gr.addColorStop(.35,'rgba(255,200,60,.45)');gr.addColorStop(1,'rgba(255,200,60,0)');gx.fillStyle=gr;gx.fillRect(0,0,64,64);const glow=new T.Sprite(new T.SpriteMaterial({map:new T.CanvasTexture(gc),blending:T.AdditiveBlending,depthWrite:false,fog:false}));glow.scale.set(3.2,3.2,1);glow.position.y=1.4;robot.add(glow);
+const head=new T.PointLight(0xfff2cc,0,14);head.position.set(0,1,.8);robot.add(head);scene.add(robot);
+const ring=new T.Mesh(new T.RingGeometry(.97,1,64),new T.MeshBasicMaterial({color:0x00e5ff,side:T.DoubleSide,transparent:true,opacity:.8,fog:false}));ring.rotation.x=-Math.PI/2;ring.position.y=.04;scene.add(ring);
+// rain
+const rp=new Float32Array(1400*6);for(let i=0;i<1400;i++){const x=(Math.random()-.5)*N,y=Math.random()*18,z=(Math.random()-.5)*N;rp.set([x,y,z,x,y-.7,z],i*6)}
+const rainG=new T.BufferGeometry();rainG.setAttribute('position',new T.BufferAttribute(rp,3));
+const rain=new T.LineSegments(rainG,new T.LineBasicMaterial({color:0xaec6e0,transparent:true,opacity:.55}));rain.visible=false;scene.add(rain);
+// obstacles
+const mUn=new T.MeshLambertMaterial({color:0xff8c1a}),mKn=new T.MeshLambertMaterial({color:0xe02424,emissive:0x660000});
+function addObs(x,y,kind){const m=kind==='cone'?new T.Mesh(new T.ConeGeometry(.38,.9,16),mUn):new T.Mesh(new T.BoxGeometry(.8,.8,.8),mUn);m.position.set(cx(x),kind==='cone'?.45:.4,cx(y));scene.add(m);obs.push({x,y,m,known:false})}
+function clearObs(){obs.forEach(o=>scene.remove(o.m));obs=[]}
+// A* with clearance-aware cost
+function clearance(){const c=new Float32Array(N*N);for(let y=0;y<N;y++)for(let x=0;x<N;x++){let m=9;for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){const a=x+dx,b=y+dy;if(a<0||b<0||a>=N||b>=N)continue;if(S.known[idx(a,b)]){const d=Math.hypot(dx,dy);if(d<m)m=d}}c[idx(x,y)]=m}return c}
+function astar(sx,sy,gx,gy){const clr=clearance(),G=new Float32Array(N*N).fill(1e9),P=new Int32Array(N*N).fill(-1),C=new Uint8Array(N*N),F={};
+ const h=(x,y)=>{const dx=Math.abs(x-gx),dy=Math.abs(y-gy);return Math.max(dx,dy)+.4142*Math.min(dx,dy)};
+ const s=idx(sx,sy);G[s]=0;F[s]=h(sx,sy);const open=[s];
+ while(open.length){let bi=0;for(let i=1;i<open.length;i++)if(F[open[i]]<F[open[bi]])bi=i;const cur=open.splice(bi,1)[0];if(C[cur])continue;C[cur]=1;const x=cur%N,y=(cur/N)|0;
+  if(x===gx&&y===gy){const p=[];let k=cur;while(k>=0){p.push([k%N,(k/N)|0]);k=P[k]}return p.reverse()}
+  for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(!dx&&!dy)continue;const a=x+dx,b=y+dy;if(a<0||b<0||a>=N||b>=N)continue;const n=idx(a,b);
+   if(S.known[n]||C[n])continue;if(dx&&dy&&(S.known[idx(x+dx,y)]||S.known[idx(x,y+dy)]))continue;
+   const d=Math.hypot(dx,dy),pen=clr[n]<3?(3-clr[n])*.8:0,ng=G[cur]+d*(1+pen);if(ng<G[n]){G[n]=ng;P[n]=cur;F[n]=ng+h(a,b);open.push(n)}}}
+ return null}
+function plan(why){const p=astar(w2g(S.x),w2g(S.z),GX,GY);
+ while(pathG.children.length)pathG.remove(pathG.children[0]);
+ if(!p){S.path=[];running=false;S.done=true;S.status='Goal unreachable';$('run').textContent='▶ Start';$('np').hidden=false;msg('No other way found to reach the goal.');return}
+ $('np').hidden=true;
+ S.path=p;S.pi=1;let L=0;
+ for(let i=1;i<p.length;i++){const a=p[i-1],b=p[i],dx=b[0]-a[0],dz=b[1]-a[1],l=Math.hypot(dx,dz);L+=l;
+  const m=new T.Mesh(new T.BoxGeometry(.14,.02,l),new T.MeshBasicMaterial({color:0xffd400,fog:false}));m.position.set(0,.07,0);m.position.x=(cx(a[0])+cx(b[0]))/2;m.position.z=(cx(a[1])+cx(b[1]))/2;m.rotation.y=Math.atan2(dx,dz);pathG.add(m)}
+ S.plen=L;msg(why+' · A* path length '+L.toFixed(1))}
+function msg(t){$('msg').textContent=t}
+function reset(){$('np').hidden=true;clearObs();S={x:cx(SX),z:cx(SY),yaw:Math.atan2(GX-SX,GY-SY),known:Uint8Array.from(STATIC),path:[],pi:1,dist:0,replans:0,detected:0,collisions:0,time:0,pause:0,done:false,status:'Ready',plen:0};
+ [[9,8,'cone'],[9,20,'box'],[16,11,'cone'],[16,18,'box'],[22,15,'cone'],[23,22,'box']].forEach(o=>addObs(o[0],o[1],o[2]));
+ running=false;$('run').textContent='▶ Start';plan('Initial plan on known map');S.status='Ready'}
+function step(dt){if(!running||S.done)return;S.time+=dt;if(S.pause>0){S.pause-=dt;return}
+ const rng=RANGE[ml?'ml':'base'][weather];let need=false;
+ for(const o of obs){if(o.known)continue;const d=Math.hypot(S.x-cx(o.x),S.z-cx(o.y));if(d>rng)continue;
+  o.known=true;o.m.material=mKn;S.known[idx(o.x,o.y)]=1;S.detected++;
+  if(d<BRAKE){S.collisions++;S.pause=.7;S.status='Collision (detected inside braking distance)'}else S.status='Obstacle detected'
+  if(S.path.slice(S.pi).some(c=>c[0]===o.x&&c[1]===o.y))need=true}
+ if(need){S.replans++;plan('Obstacle on path → replanned from current position')}
+ if(S.done||!running)return;
+ if(S.pi>=S.path.length){S.done=true;running=false;S.status='Goal reached';$('run').textContent='▶ Start';msg('Goal reached.');return}
+ const t=S.path[S.pi],tx=cx(t[0]),tz=cx(t[1]),dx=tx-S.x,dz=tz-S.z,d=Math.hypot(dx,dz);
+ let da=Math.atan2(dx,dz)-S.yaw;da=Math.atan2(Math.sin(da),Math.cos(da));S.yaw+=da*Math.min(1,dt*10);
+ const s=Math.min(d,SPEED*dt*Math.max(.25,Math.cos(da)));if(d>1e-4){S.x+=dx/d*s;S.z+=dz/d*s;S.dist+=s}
+ if(d-s<1e-3)S.pi++;if(S.pause<=0&&S.status!=='Navigating')S.status='Navigating'}
+function applyWx(){const w=WX[weather];scene.background=new T.Color(w.bg);scene.fog=new T.Fog(w.bg,w.fog[0],w.fog[1]);amb.intensity=w.amb;sun.intensity=w.sun;head.intensity=w.head*1.6;rain.visible=weather==='rain'}
+function ui(){document.querySelectorAll('[data-w]').forEach(b=>b.classList.toggle('on',b.dataset.w===weather));$('ml').classList.toggle('on',ml);$('ml').textContent='Detector: '+(ml?'ML-assisted':'Baseline')}
+$('run').onclick=()=>{if(S.done)reset();running=!running;$('run').textContent=running?'⏸ Pause':'▶ Start';if(running&&S.status==='Ready')S.status='Navigating'};
+$('rst').onclick=reset;$('blk').onclick=()=>{let n=0;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const x=GX+dx,y=GY+dy;if((!dx&&!dy)||x<=0||y<=0||x>=N-1||y>=N-1||obs.some(o=>o.x===x&&o.y===y))continue;addObs(x,y,'box');n++}msg('Goal surrounded by hidden obstacles. Press Start.')};$('fol').onclick=()=>{follow=!follow;$('fol').classList.toggle('on',follow)};
+$('ml').onclick=()=>{ml=!ml;ui()};
+document.querySelectorAll('[data-w]').forEach(b=>b.onclick=()=>{weather=b.dataset.w;applyWx();ui()});
+$('sud').onclick=()=>{const r=S.path.slice(S.pi+4);for(const c of r.slice(0,5)){if(!(c[0]===GX&&c[1]===GY)&&!obs.some(o=>o.x===c[0]&&o.y===c[1])){addObs(c[0],c[1],'box');msg('Sudden obstacle dropped ahead on the path (hidden until sensed)');return}}msg('Path too short for a sudden obstacle')};
+// camera
+let yaw=.6,pit=.85,dst=26,tgt=new T.Vector3(),pts=new Map(),moved=0,pd=0;
+const cv=renderer.domElement;
+cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);pts.set(e.pointerId,[e.clientX,e.clientY]);moved=0;pd=pts.size===2?dist2():0});
+cv.addEventListener('pointermove',e=>{if(!pts.has(e.pointerId))return;const p=pts.get(e.pointerId),dx=e.clientX-p[0],dy=e.clientY-p[1];pts.set(e.pointerId,[e.clientX,e.clientY]);moved+=Math.abs(dx)+Math.abs(dy);
+ if(pts.size===2){const d=dist2();dst=Math.min(50,Math.max(6,dst*pd/d));pd=d}else{yaw-=dx*.006;pit=Math.min(1.4,Math.max(.15,pit+dy*.005))}});
+cv.addEventListener('pointerup',e=>{pts.delete(e.pointerId);if(moved<6&&pts.size===0)tap(e)});
+cv.addEventListener('pointercancel',e=>pts.delete(e.pointerId));
+cv.addEventListener('wheel',e=>{e.preventDefault();dst=Math.min(50,Math.max(6,dst*(1+e.deltaY*.001)))},{passive:false});
+function dist2(){const a=[...pts.values()];return Math.hypot(a[0][0]-a[1][0],a[0][1]-a[1][1])||1}
+function tap(e){const r=cv.getBoundingClientRect(),v=new T.Vector2((e.clientX-r.left)/r.width*2-1,-((e.clientY-r.top)/r.height)*2+1),rc=new T.Raycaster();rc.setFromCamera(v,cam);
+ const h=rc.intersectObject(floor)[0];if(!h)return;const x=w2g(h.point.x),y=w2g(h.point.z);
+ if(x<0||y<0||x>=N||y>=N||STATIC[idx(x,y)]||(x===GX&&y===GY)||obs.some(o=>o.x===x&&o.y===y)||Math.hypot(S.x-cx(x),S.z-cx(y))<2){msg('Cannot place an obstacle there');return}
+ addObs(x,y,'box');msg('Hidden obstacle placed – robot will detect it with its sensor')}
+function resize(){const w=innerWidth,h=innerHeight;renderer.setSize(w,h);cam.aspect=w/h;cam.updateProjectionMatrix()}addEventListener('resize',resize);resize();
+let last=performance.now(),uiT=0;
+function loop(now){requestAnimationFrame(loop);const dt=Math.min(.05,(now-last)/1000);last=now;step(dt);
+ robot.position.set(S.x,0,S.z);robot.rotation.y=S.yaw;const rng=RANGE[ml?'ml':'base'][weather];ring.position.set(S.x,.04,S.z);ring.scale.set(rng,rng,1);
+ if(rain.visible){const a=rainG.attributes.position;for(let i=0;i<a.count;i+=2){let y=a.getY(i)-dt*25;if(y<0)y+=18;a.setY(i,y);a.setY(i+1,y-.7)}a.needsUpdate=true}
+ tgt.lerp(follow?new T.Vector3(S.x,0,S.z):new T.Vector3(0,0,0),.08);
+ cam.position.set(tgt.x+Math.sin(yaw)*Math.cos(pit)*dst,Math.sin(pit)*dst,tgt.z+Math.cos(yaw)*Math.cos(pit)*dst);cam.lookAt(tgt);
+ scene.fog.near=WX[weather].fog[0]+dst;scene.fog.far=WX[weather].fog[1]+dst;const pu=1+.25*Math.sin(now/180);glow.scale.set(3.2*pu,3.2*pu,1);renderer.render(scene,cam);uiT+=dt;if(uiT>.1){uiT=0;
+  $('st').innerHTML='Weather: <b>'+weather+'</b> · Sensor range: <b>'+rng+'</b><br>Status: '+S.status+'<br>Path (A*): '+S.plen.toFixed(1)+' · Travelled: '+S.dist.toFixed(1)+'<br>Replans: '+S.replans+' · Detected: '+S.detected+' · Collisions: '+S.collisions+'<br>Time: '+S.time.toFixed(1)+' s'}}
+applyWx();ui();reset();requestAnimationFrame(loop);
+</script></body></html>
